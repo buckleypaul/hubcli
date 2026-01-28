@@ -1,0 +1,20 @@
+[
+  {
+    "device_id": "dev-001",
+    "name": "Test Device 1",
+    "key": "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY=",
+    "encryption": "AES-256-CTR",
+    "created_at": "2024-01-15T10:30:00Z",
+    "tags": {
+      "env": "test",
+      "location": "office"
+    }
+  },
+  {
+    "device_id": "dev-002",
+    "name": "Test Device 2",
+    "key": "MTIzNDU2Nzg5MGFiY2RlZmdoaWprbG1ub3BxcnN0dXY=",
+    "encryption": "AES-128-CTR",
+    "created_at": "2024-01-16T14:45:00Z"
+  }
+]

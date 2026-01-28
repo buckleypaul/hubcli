@@ -1,0 +1,36 @@
+[
+  {
+    "device_id": "dev-001",
+    "payload": "0102030405060708",
+    "timestamp": "2024-01-20T12:00:00Z",
+    "location": {
+      "latitude": 37.7749,
+      "longitude": -122.4194,
+      "timestamp": "2024-01-20T12:00:00Z",
+      "horizontal_accuracy": 5.0,
+      "altitude": 10.0,
+      "vertical_accuracy": 3.0
+    }
+  },
+  {
+    "device_id": "dev-001",
+    "payload": "aabbccddeeff0011",
+    "timestamp": "2024-01-20T12:05:00Z",
+    "location": {
+      "latitude": 37.7750,
+      "longitude": -122.4195,
+      "timestamp": "2024-01-20T12:05:00Z",
+      "horizontal_accuracy": 4.5
+    }
+  },
+  {
+    "device_id": "dev-002",
+    "payload": "1122334455667788",
+    "timestamp": "2024-01-20T12:10:00Z",
+    "location": {
+      "latitude": 40.7128,
+      "longitude": -74.0060,
+      "timestamp": "2024-01-20T12:10:00Z"
+    }
+  }
+]
