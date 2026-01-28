@@ -106,29 +106,6 @@ func TestBLEScanModel_ClearPackets_WhenScanning(t *testing.T) {
 	assert.Empty(t, m.packets)
 }
 
-func TestBLEScanModel_IngestPackets(t *testing.T) {
-	m := NewBLEScanModel(nil)
-	m.state = BLEScanStateInit
-	m.packets = []models.EncryptedPacket{{Payload: []byte{0x01}}}
-
-	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
-
-	assert.Equal(t, BLEScanStateIngesting, m.state)
-	assert.NotNil(t, cmd)
-}
-
-func TestBLEScanModel_IngestPackets_NoPackets(t *testing.T) {
-	m := NewBLEScanModel(nil)
-	m.state = BLEScanStateInit
-	m.packets = []models.EncryptedPacket{}
-
-	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
-
-	// Should not change state when no packets
-	assert.Equal(t, BLEScanStateInit, m.state)
-	assert.Nil(t, cmd)
-}
-
 func TestBLEScanModel_BLEScanStartedMsg(t *testing.T) {
 	m := NewBLEScanModel(nil)
 
@@ -187,30 +164,6 @@ func TestBLEScanModel_BLEScanStoppedMsg_WithScanStopped(t *testing.T) {
 	assert.Equal(t, BLEScanStateInit, m.state)
 }
 
-func TestBLEScanModel_BLEIngestCompleteMsg(t *testing.T) {
-	m := NewBLEScanModel(nil)
-	m.state = BLEScanStateIngesting
-	m.packets = []models.EncryptedPacket{{Payload: []byte{0x01}}}
-
-	m, cmd := m.Update(BLEIngestCompleteMsg{Count: 1})
-
-	// After successful ingestion, should start scanning again
-	assert.Empty(t, m.packets) // Packets cleared after ingestion
-	assert.NotNil(t, cmd)      // Returns startScan command
-}
-
-func TestBLEScanModel_BLEIngestCompleteMsg_WithError(t *testing.T) {
-	m := NewBLEScanModel(nil)
-	m.state = BLEScanStateIngesting
-	m.packets = []models.EncryptedPacket{{Payload: []byte{0x01}}}
-
-	m, _ = m.Update(BLEIngestCompleteMsg{Error: assert.AnError})
-
-	assert.Equal(t, BLEScanStateError, m.state)
-	assert.Error(t, m.err)
-	assert.Len(t, m.packets, 1) // Packets not cleared on error
-}
-
 func TestBLEScanModel_View(t *testing.T) {
 	m := NewBLEScanModel(nil)
 	m.width = 80
@@ -236,19 +189,6 @@ func TestBLEScanModel_ViewScanning(t *testing.T) {
 	assert.Contains(t, view, "Scanning")
 	assert.Contains(t, view, "SCANNING")
 	assert.Contains(t, view, "pause")
-}
-
-func TestBLEScanModel_ViewIngesting(t *testing.T) {
-	m := NewBLEScanModel(nil)
-	m.width = 80
-	m.height = 24
-	m.state = BLEScanStateIngesting
-	m.packets = []models.EncryptedPacket{{Payload: []byte{0x01}}}
-
-	view := m.View()
-
-	assert.Contains(t, view, "Ingesting")
-	assert.Contains(t, view, "INGESTING")
 }
 
 func TestBLEScanModel_ViewError(t *testing.T) {
@@ -286,7 +226,6 @@ func TestBLEScanModel_ViewWithPackets(t *testing.T) {
 	view := m.View()
 
 	assert.Contains(t, view, "1 packet(s)")
-	assert.Contains(t, view, "ingest")
 	assert.Contains(t, view, "clear")
 }
 

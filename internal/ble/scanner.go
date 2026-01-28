@@ -115,6 +115,7 @@ func (s *Scanner) Stop() {
 		close(s.stopCh)
 		s.stopCh = nil
 	}
+	s.scanning = false
 }
 
 // Scan scans for Hubble BLE advertisements and returns all found packets

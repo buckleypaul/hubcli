@@ -25,7 +25,6 @@ type BLEScanState int
 const (
 	BLEScanStateInit BLEScanState = iota // Initial state before scanning starts
 	BLEScanStateScanning
-	BLEScanStateIngesting
 	BLEScanStateError
 )
 
@@ -44,12 +43,6 @@ type (
 
 	// BLEScanStoppedMsg indicates scanning has stopped
 	BLEScanStoppedMsg struct {
-		Error error
-	}
-
-	// BLEIngestCompleteMsg indicates packet ingestion is complete
-	BLEIngestCompleteMsg struct {
-		Count int
 		Error error
 	}
 
@@ -82,7 +75,6 @@ type BLEScanModel struct {
 type bleScanKeyMap struct {
 	Pause  key.Binding
 	Resume key.Binding
-	Ingest key.Binding
 	Clear  key.Binding
 	Back   key.Binding
 	Quit   key.Binding
@@ -97,10 +89,6 @@ func defaultBLEScanKeyMap() bleScanKeyMap {
 		Resume: key.NewBinding(
 			key.WithKeys("p", " ", "r"),
 			key.WithHelp("p/space/r", "resume"),
-		),
-		Ingest: key.NewBinding(
-			key.WithKeys("i"),
-			key.WithHelp("i", "ingest to cloud"),
 		),
 		Clear: key.NewBinding(
 			key.WithKeys("c"),
@@ -210,26 +198,14 @@ func (m BLEScanModel) Update(msg tea.Msg) (BLEScanModel, tea.Cmd) {
 			}
 			return m, tea.Quit
 
-		case key.Matches(msg, m.keys.Pause):
+		case key.Matches(msg, m.keys.Pause) || key.Matches(msg, m.keys.Resume):
+			// Toggle between scanning and paused states
 			if m.state == BLEScanStateScanning {
 				m.stopScan()
 				m.state = BLEScanStateInit
 				return m, nil
-			}
-
-		case key.Matches(msg, m.keys.Resume):
-			if m.state == BLEScanStateInit || m.state == BLEScanStateError {
+			} else if m.state == BLEScanStateInit || m.state == BLEScanStateError {
 				return m, m.startScan()
-			}
-
-		case key.Matches(msg, m.keys.Ingest):
-			if m.state != BLEScanStateIngesting && len(m.packets) > 0 {
-				// Pause scanning while ingesting
-				if m.state == BLEScanStateScanning {
-					m.stopScan()
-				}
-				m.state = BLEScanStateIngesting
-				return m, tea.Batch(m.spinner.Tick, m.ingestPackets())
 			}
 
 		case key.Matches(msg, m.keys.Clear):
@@ -278,20 +254,8 @@ func (m BLEScanModel) Update(msg tea.Msg) (BLEScanModel, tea.Cmd) {
 		}
 		return m, nil
 
-	case BLEIngestCompleteMsg:
-		if msg.Error != nil {
-			m.state = BLEScanStateError
-			m.err = msg.Error
-			return m, nil
-		}
-		// Clear packets after successful ingestion and resume scanning
-		m.packets = nil
-		m.rawPackets = nil
-		m.updateTable()
-		return m, m.startScan()
-
 	case spinner.TickMsg:
-		if m.state == BLEScanStateScanning || m.state == BLEScanStateIngesting {
+		if m.state == BLEScanStateScanning {
 			var cmd tea.Cmd
 			m.spinner, cmd = m.spinner.Update(msg)
 			return m, cmd
@@ -334,14 +298,7 @@ func (m BLEScanModel) View() string {
 		content.WriteString("\n\n")
 		content.WriteString(centerText(fmt.Sprintf("Found %d packet(s)", len(m.packets))))
 		content.WriteString("\n\n")
-		if len(m.packets) > 0 {
-			content.WriteString(m.table.View())
-		}
-
-	case BLEScanStateIngesting:
-		content.WriteString(centerText(fmt.Sprintf("%s Ingesting %d packet(s) to cloud...",
-			m.spinner.View(), len(m.packets))))
-		content.WriteString("\n")
+		content.WriteString(m.table.View())
 
 	case BLEScanStateError:
 		content.WriteString(centerText(common.ErrorTextStyle.Render("Error: " + m.err.Error())))
@@ -353,10 +310,6 @@ func (m BLEScanModel) View() string {
 			content.WriteString(centerText(common.ErrorTextStyle.Render("Scanner Error: " + m.scannerErr.Error())))
 			content.WriteString("\n\n")
 			content.WriteString(centerText(common.MutedTextStyle.Render("BLE scanning may not be available.")))
-		} else if len(m.packets) == 0 {
-			content.WriteString(centerText(common.MutedTextStyle.Render("Scan paused. No packets captured yet.")))
-			content.WriteString("\n\n")
-			content.WriteString(centerText(common.MutedTextStyle.Render("Press 'r' or space to resume scanning.")))
 		} else {
 			content.WriteString(centerText(fmt.Sprintf("Scan paused. %d packet(s) captured", len(m.packets))))
 			content.WriteString("\n\n")
@@ -408,13 +361,6 @@ func (m BLEScanModel) renderStatus() string {
 			Background(common.ColorPrimary).
 			Bold(true).
 			Padding(0, 1)
-	case BLEScanStateIngesting:
-		stateStr = "INGESTING"
-		stateStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#FFFFFF")).
-			Background(common.ColorWarning).
-			Bold(true).
-			Padding(0, 1)
 	case BLEScanStateError:
 		stateStr = "ERROR"
 		stateStyle = lipgloss.NewStyle().
@@ -436,28 +382,12 @@ func (m BLEScanModel) renderHelp() string {
 	case BLEScanStateInit:
 		helpText = []string{
 			common.FormatHelp("r/space", "resume"),
-		}
-		if len(m.packets) > 0 {
-			helpText = append(helpText,
-				common.FormatHelp("i", "ingest"),
-			)
-		}
-		helpText = append(helpText,
 			common.FormatHelp("c", "clear"),
-		)
+		}
 	case BLEScanStateScanning:
 		helpText = []string{
 			common.FormatHelp("p/space", "pause"),
-		}
-		if len(m.packets) > 0 {
-			helpText = append(helpText, common.FormatHelp("i", "ingest"))
-		}
-		helpText = append(helpText,
 			common.FormatHelp("c", "clear"),
-		)
-	case BLEScanStateIngesting:
-		helpText = []string{
-			common.FormatHelp("", "please wait..."),
 		}
 	case BLEScanStateError:
 		helpText = []string{
@@ -705,28 +635,6 @@ func (m *BLEScanModel) pollResults() tea.Cmd {
 			// No result available yet
 			return nil
 		}
-	}
-}
-
-func (m BLEScanModel) ingestPackets() tea.Cmd {
-	return func() tea.Msg {
-		if m.client == nil {
-			return BLEIngestCompleteMsg{Error: fmt.Errorf("no API client")}
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
-
-		// Convert packets to the format expected by the API
-		encryptedPackets := make([]models.EncryptedPacket, len(m.packets))
-		copy(encryptedPackets, m.packets)
-
-		err := m.client.IngestEncryptedPackets(ctx, encryptedPackets)
-		if err != nil {
-			return BLEIngestCompleteMsg{Error: err}
-		}
-
-		return BLEIngestCompleteMsg{Count: len(m.packets)}
 	}
 }
 
