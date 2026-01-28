@@ -24,6 +24,15 @@ var (
 	ErrScanStopped = errors.New("scan stopped")
 )
 
+// ScannerInterface defines the interface for BLE scanners
+type ScannerInterface interface {
+	IsScanning() bool
+	Stop()
+	Scan(ctx context.Context, opts ScanOptions) ([]models.EncryptedPacket, error)
+	ScanSingle(ctx context.Context, opts ScanOptions) (*models.EncryptedPacket, error)
+	ScanStream(ctx context.Context, opts ScanOptions) (<-chan ScanResult, error)
+}
+
 // ScanResult represents a single BLE scan result
 type ScanResult struct {
 	Packet *models.EncryptedPacket
@@ -66,15 +75,27 @@ type Scanner struct {
 	stopCh   chan struct{}
 }
 
+// Global adapter to avoid multiple Enable() calls
+var (
+	globalAdapter     *bluetooth.Adapter
+	globalAdapterOnce sync.Once
+	globalAdapterErr  error
+)
+
 // NewScanner creates a new BLE scanner
 func NewScanner() (*Scanner, error) {
-	adapter := bluetooth.DefaultAdapter
-	if err := adapter.Enable(); err != nil {
-		return nil, errors.Join(ErrAdapterNotEnabled, err)
+	// Only enable the adapter once globally
+	globalAdapterOnce.Do(func() {
+		globalAdapter = bluetooth.DefaultAdapter
+		globalAdapterErr = globalAdapter.Enable()
+	})
+
+	if globalAdapterErr != nil {
+		return nil, errors.Join(ErrAdapterNotEnabled, globalAdapterErr)
 	}
 
 	return &Scanner{
-		adapter: adapter,
+		adapter: globalAdapter,
 	}, nil
 }
 
@@ -112,6 +133,10 @@ func (s *Scanner) Scan(ctx context.Context, opts ScanOptions) ([]models.Encrypte
 		s.scanning = false
 		s.mu.Unlock()
 	}()
+
+	// Stop any lingering scan from a previous session
+	s.adapter.StopScan()
+	time.Sleep(100 * time.Millisecond)
 
 	var packets []models.EncryptedPacket
 	var mu sync.Mutex
@@ -211,6 +236,10 @@ func (s *Scanner) ScanStream(ctx context.Context, opts ScanOptions) (<-chan Scan
 	s.stopCh = make(chan struct{})
 	s.mu.Unlock()
 
+	// Stop any lingering scan from a previous session
+	s.adapter.StopScan()
+	time.Sleep(100 * time.Millisecond) // Give adapter time to fully stop
+
 	results := make(chan ScanResult, 100)
 
 	// Set up timeout context
@@ -272,7 +301,7 @@ func (s *Scanner) ScanStream(ctx context.Context, opts ScanOptions) (<-chan Scan
 			select {
 			case results <- scanResult:
 			default:
-				// Channel full, skip this result
+				// Channel full, result dropped
 			}
 
 			// Check if we've reached max packets

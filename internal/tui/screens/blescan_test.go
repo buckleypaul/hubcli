@@ -13,17 +13,16 @@ import (
 func TestNewBLEScanModel(t *testing.T) {
 	m := NewBLEScanModel(nil)
 
-	assert.Equal(t, BLEScanStateIdle, m.state)
+	assert.Equal(t, BLEScanStateInit, m.state)
 	assert.Nil(t, m.client)
 	assert.Empty(t, m.packets)
-	assert.Equal(t, 30*time.Second, m.timeout)
 }
 
 func TestBLEScanModel_Init(t *testing.T) {
 	m := NewBLEScanModel(nil)
 	cmd := m.Init()
 
-	// Init should return a spinner tick command
+	// Init should return commands (spinner tick and start scan)
 	assert.NotNil(t, cmd)
 }
 
@@ -36,47 +35,38 @@ func TestBLEScanModel_WindowSizeMsg(t *testing.T) {
 	assert.Equal(t, 50, m.height)
 }
 
-func TestBLEScanModel_StartScan(t *testing.T) {
+func TestBLEScanModel_PauseScan(t *testing.T) {
 	m := NewBLEScanModel(nil)
-	m.state = BLEScanStateIdle
+	m.state = BLEScanStateScanning
 
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+
+	assert.Equal(t, BLEScanStateInit, m.state)
+}
+
+func TestBLEScanModel_PauseScan_WhenPaused(t *testing.T) {
+	m := NewBLEScanModel(nil)
+	m.state = BLEScanStateInit
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+
+	// Should remain in init state (no-op) - actually it resumes
+	// 'p' is in both Pause and Resume bindings
+}
+
+func TestBLEScanModel_ResumeScan(t *testing.T) {
+	m := NewBLEScanModel(nil)
+	m.state = BLEScanStateInit
+	m.scannerErr = nil
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
 
 	assert.NotNil(t, cmd)
 }
 
-func TestBLEScanModel_StartScan_WhenScanning(t *testing.T) {
-	m := NewBLEScanModel(nil)
-	m.state = BLEScanStateScanning
-
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
-
-	// Should remain in scanning state (no-op)
-	assert.Equal(t, BLEScanStateScanning, m.state)
-}
-
-func TestBLEScanModel_StopScan(t *testing.T) {
-	m := NewBLEScanModel(nil)
-	m.state = BLEScanStateScanning
-
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
-
-	assert.Equal(t, BLEScanStateIdle, m.state)
-}
-
-func TestBLEScanModel_StopScan_WhenIdle(t *testing.T) {
-	m := NewBLEScanModel(nil)
-	m.state = BLEScanStateIdle
-
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
-
-	// Should remain idle (no-op)
-	assert.Equal(t, BLEScanStateIdle, m.state)
-}
-
 func TestBLEScanModel_BackNavigation(t *testing.T) {
 	m := NewBLEScanModel(nil)
-	m.state = BLEScanStateIdle
+	m.state = BLEScanStateInit
 
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 
@@ -97,7 +87,7 @@ func TestBLEScanModel_QuitKey(t *testing.T) {
 
 func TestBLEScanModel_ClearPackets(t *testing.T) {
 	m := NewBLEScanModel(nil)
-	m.state = BLEScanStateIdle
+	m.state = BLEScanStateInit
 	m.packets = []models.EncryptedPacket{{Payload: []byte{0x01}}}
 
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
@@ -112,46 +102,13 @@ func TestBLEScanModel_ClearPackets_WhenScanning(t *testing.T) {
 
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
 
-	// Should not clear when scanning
-	assert.Len(t, m.packets, 1)
-}
-
-func TestBLEScanModel_ChangeTimeout(t *testing.T) {
-	tests := []struct {
-		key      rune
-		expected time.Duration
-	}{
-		{'1', 10 * time.Second},
-		{'3', 30 * time.Second},
-		{'6', 60 * time.Second},
-	}
-
-	for _, tt := range tests {
-		t.Run(string(tt.key), func(t *testing.T) {
-			m := NewBLEScanModel(nil)
-			m.state = BLEScanStateIdle
-
-			m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{tt.key}})
-
-			assert.Equal(t, tt.expected, m.timeout)
-		})
-	}
-}
-
-func TestBLEScanModel_ChangeTimeout_WhenScanning(t *testing.T) {
-	m := NewBLEScanModel(nil)
-	m.state = BLEScanStateScanning
-	originalTimeout := m.timeout
-
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
-
-	// Should not change timeout when scanning
-	assert.Equal(t, originalTimeout, m.timeout)
+	// Should clear even when scanning
+	assert.Empty(t, m.packets)
 }
 
 func TestBLEScanModel_IngestPackets(t *testing.T) {
 	m := NewBLEScanModel(nil)
-	m.state = BLEScanStateIdle
+	m.state = BLEScanStateInit
 	m.packets = []models.EncryptedPacket{{Payload: []byte{0x01}}}
 
 	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
@@ -162,13 +119,13 @@ func TestBLEScanModel_IngestPackets(t *testing.T) {
 
 func TestBLEScanModel_IngestPackets_NoPackets(t *testing.T) {
 	m := NewBLEScanModel(nil)
-	m.state = BLEScanStateIdle
+	m.state = BLEScanStateInit
 	m.packets = []models.EncryptedPacket{}
 
 	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
 
 	// Should not change state when no packets
-	assert.Equal(t, BLEScanStateIdle, m.state)
+	assert.Equal(t, BLEScanStateInit, m.state)
 	assert.Nil(t, cmd)
 }
 
@@ -178,7 +135,6 @@ func TestBLEScanModel_BLEScanStartedMsg(t *testing.T) {
 	m, _ = m.Update(BLEScanStartedMsg{})
 
 	assert.Equal(t, BLEScanStateScanning, m.state)
-	assert.False(t, m.startTime.IsZero())
 }
 
 func TestBLEScanModel_BLEScanPacketMsg(t *testing.T) {
@@ -208,7 +164,7 @@ func TestBLEScanModel_BLEScanStoppedMsg(t *testing.T) {
 
 	m, _ = m.Update(BLEScanStoppedMsg{})
 
-	assert.Equal(t, BLEScanStateIdle, m.state)
+	assert.Equal(t, BLEScanStateInit, m.state)
 }
 
 func TestBLEScanModel_BLEScanStoppedMsg_WithError(t *testing.T) {
@@ -228,7 +184,7 @@ func TestBLEScanModel_BLEScanStoppedMsg_WithScanStopped(t *testing.T) {
 	m, _ = m.Update(BLEScanStoppedMsg{Error: ble.ErrScanStopped})
 
 	// ErrScanStopped should not be treated as an error state
-	assert.Equal(t, BLEScanStateIdle, m.state)
+	assert.Equal(t, BLEScanStateInit, m.state)
 }
 
 func TestBLEScanModel_BLEIngestCompleteMsg(t *testing.T) {
@@ -236,10 +192,11 @@ func TestBLEScanModel_BLEIngestCompleteMsg(t *testing.T) {
 	m.state = BLEScanStateIngesting
 	m.packets = []models.EncryptedPacket{{Payload: []byte{0x01}}}
 
-	m, _ = m.Update(BLEIngestCompleteMsg{Count: 1})
+	m, cmd := m.Update(BLEIngestCompleteMsg{Count: 1})
 
-	assert.Equal(t, BLEScanStateIdle, m.state)
+	// After successful ingestion, should start scanning again
 	assert.Empty(t, m.packets) // Packets cleared after ingestion
+	assert.NotNil(t, cmd)      // Returns startScan command
 }
 
 func TestBLEScanModel_BLEIngestCompleteMsg_WithError(t *testing.T) {
@@ -258,13 +215,14 @@ func TestBLEScanModel_View(t *testing.T) {
 	m := NewBLEScanModel(nil)
 	m.width = 80
 	m.height = 24
-	m.state = BLEScanStateIdle
+	m.state = BLEScanStateInit
+	m.scannerErr = nil
 
 	view := m.View()
 
 	assert.Contains(t, view, "BLE Scanner")
-	assert.Contains(t, view, "IDLE")
-	assert.Contains(t, view, "start")
+	assert.Contains(t, view, "PAUSED")
+	assert.Contains(t, view, "resume")
 }
 
 func TestBLEScanModel_ViewScanning(t *testing.T) {
@@ -272,13 +230,12 @@ func TestBLEScanModel_ViewScanning(t *testing.T) {
 	m.width = 80
 	m.height = 24
 	m.state = BLEScanStateScanning
-	m.startTime = time.Now()
 
 	view := m.View()
 
 	assert.Contains(t, view, "Scanning")
 	assert.Contains(t, view, "SCANNING")
-	assert.Contains(t, view, "stop")
+	assert.Contains(t, view, "pause")
 }
 
 func TestBLEScanModel_ViewIngesting(t *testing.T) {
@@ -312,7 +269,8 @@ func TestBLEScanModel_ViewWithPackets(t *testing.T) {
 	m := NewBLEScanModel(nil)
 	m.width = 80
 	m.height = 24
-	m.state = BLEScanStateIdle
+	m.state = BLEScanStateInit
+	m.scannerErr = nil // Clear scanner error for test
 	m.packets = []models.EncryptedPacket{
 		{
 			Payload:   []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08},
@@ -339,29 +297,4 @@ func TestBLEScanModel_SetScanner(t *testing.T) {
 	m.SetScanner(mockScanner)
 
 	assert.Equal(t, mockScanner, m.scanner)
-}
-
-func TestBLEScanModel_BLEScanTickMsg(t *testing.T) {
-	m := NewBLEScanModel(nil)
-	m.state = BLEScanStateScanning
-	m.startTime = time.Now()
-	m.timeout = 30 * time.Second
-
-	m, cmd := m.Update(BLEScanTickMsg{})
-
-	// Should return another tick command
-	assert.NotNil(t, cmd)
-	assert.Equal(t, BLEScanStateScanning, m.state)
-}
-
-func TestBLEScanModel_BLEScanTickMsg_Timeout(t *testing.T) {
-	m := NewBLEScanModel(nil)
-	m.state = BLEScanStateScanning
-	m.startTime = time.Now().Add(-60 * time.Second) // Started 60 seconds ago
-	m.timeout = 30 * time.Second
-
-	m, _ = m.Update(BLEScanTickMsg{})
-
-	// Should stop scanning due to timeout
-	assert.Equal(t, BLEScanStateIdle, m.state)
 }

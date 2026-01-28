@@ -3,6 +3,7 @@ package ble
 import (
 	"encoding/binary"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/hubblenetwork/hubcli/internal/models"
@@ -87,13 +88,16 @@ func ParseAdvertisement(adv RawAdvertisement, loc models.Location) (*models.Encr
 
 // isHubbleUUID checks if a UUID string matches the Hubble service UUID
 func isHubbleUUID(uuid string) bool {
+	// Normalize to lowercase for comparison
+	uuidLower := strings.ToLower(uuid)
+
 	// Check full UUID
-	if uuid == HubbleServiceUUID {
+	if uuidLower == HubbleServiceUUID {
 		return true
 	}
 
 	// Check 16-bit short form (as hex string)
-	if uuid == "fca6" || uuid == "FCA6" || uuid == "0xfca6" || uuid == "0xFCA6" {
+	if uuidLower == "fca6" || uuidLower == "0xfca6" {
 		return true
 	}
 

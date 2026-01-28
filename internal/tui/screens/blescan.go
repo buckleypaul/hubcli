@@ -2,6 +2,7 @@ package screens
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"strings"
 	"time"
@@ -22,7 +23,7 @@ import (
 type BLEScanState int
 
 const (
-	BLEScanStateIdle BLEScanState = iota
+	BLEScanStateInit BLEScanState = iota // Initial state before scanning starts
 	BLEScanStateScanning
 	BLEScanStateIngesting
 	BLEScanStateError
@@ -31,7 +32,9 @@ const (
 // BLE scan messages
 type (
 	// BLEScanStartedMsg indicates scanning has started
-	BLEScanStartedMsg struct{}
+	BLEScanStartedMsg struct {
+		Results <-chan ble.ScanResult
+	}
 
 	// BLEScanPacketMsg is sent when a packet is discovered
 	BLEScanPacketMsg struct {
@@ -57,7 +60,7 @@ type (
 // BLEScanModel is the model for the BLE scan screen
 type BLEScanModel struct {
 	client      *api.Client
-	scanner     *ble.MockScanner // Using mock for now, will be replaced with real scanner
+	scanner     ble.ScannerInterface
 	packets     []models.EncryptedPacket
 	rawPackets  []ble.RawAdvertisement
 	table       table.Model
@@ -65,36 +68,35 @@ type BLEScanModel struct {
 	help        help.Model
 	keys        bleScanKeyMap
 
-	state      BLEScanState
-	err        error
-	scanCtx    context.Context
-	cancelScan context.CancelFunc
-	timeout    time.Duration
-	startTime  time.Time
-	width      int
-	height     int
+	state       BLEScanState
+	err         error
+	scanCtx     context.Context
+	cancelScan  context.CancelFunc
+	width       int
+	height      int
+	scannerErr  error // Error from initializing scanner
+	resultsChan <-chan ble.ScanResult
 }
 
 // bleScanKeyMap defines key bindings for the BLE scan screen
 type bleScanKeyMap struct {
-	Start   key.Binding
-	Stop    key.Binding
-	Ingest  key.Binding
-	Clear   key.Binding
-	Back    key.Binding
-	Quit    key.Binding
-	Timeout key.Binding
+	Pause  key.Binding
+	Resume key.Binding
+	Ingest key.Binding
+	Clear  key.Binding
+	Back   key.Binding
+	Quit   key.Binding
 }
 
 func defaultBLEScanKeyMap() bleScanKeyMap {
 	return bleScanKeyMap{
-		Start: key.NewBinding(
-			key.WithKeys("s"),
-			key.WithHelp("s", "start scan"),
+		Pause: key.NewBinding(
+			key.WithKeys("p", " "),
+			key.WithHelp("p/space", "pause"),
 		),
-		Stop: key.NewBinding(
-			key.WithKeys("x"),
-			key.WithHelp("x", "stop scan"),
+		Resume: key.NewBinding(
+			key.WithKeys("p", " ", "r"),
+			key.WithHelp("p/space/r", "resume"),
 		),
 		Ingest: key.NewBinding(
 			key.WithKeys("i"),
@@ -102,7 +104,7 @@ func defaultBLEScanKeyMap() bleScanKeyMap {
 		),
 		Clear: key.NewBinding(
 			key.WithKeys("c"),
-			key.WithHelp("c", "clear packets"),
+			key.WithHelp("c", "clear"),
 		),
 		Back: key.NewBinding(
 			key.WithKeys("esc"),
@@ -112,10 +114,6 @@ func defaultBLEScanKeyMap() bleScanKeyMap {
 			key.WithKeys("q"),
 			key.WithHelp("q", "quit"),
 		),
-		Timeout: key.NewBinding(
-			key.WithKeys("t"),
-			key.WithHelp("t", "set timeout"),
-		),
 	}
 }
 
@@ -123,10 +121,13 @@ func defaultBLEScanKeyMap() bleScanKeyMap {
 func NewBLEScanModel(client *api.Client) BLEScanModel {
 	columns := []table.Column{
 		{Title: "#", Width: 4},
-		{Title: "Time", Width: 12},
-		{Title: "RSSI", Width: 6},
-		{Title: "Address", Width: 18},
-		{Title: "Payload (hex)", Width: 40},
+		{Title: "Time", Width: 13},
+		{Title: "RSSI", Width: 7},
+		{Title: "Ver", Width: 4},
+		{Title: "Seq", Width: 5},
+		{Title: "Device ID", Width: 10},
+		{Title: "Auth Tag", Width: 10},
+		{Title: "Encrypted Payload", Width: 18},
 	}
 
 	t := table.New(
@@ -137,11 +138,11 @@ func NewBLEScanModel(client *api.Client) BLEScanModel {
 
 	s := table.DefaultStyles()
 	s.Header = s.Header.
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderForeground(common.ColorBorder).
-		BorderBottom(true).
 		Bold(true).
-		Foreground(common.ColorSecondary)
+		Foreground(common.ColorSecondary).
+		BorderStyle(lipgloss.HiddenBorder())
+	s.Cell = s.Cell.
+		BorderStyle(lipgloss.HiddenBorder())
 	s.Selected = s.Selected.
 		Foreground(common.ColorForeground).
 		Background(common.ColorPrimary).
@@ -152,21 +153,32 @@ func NewBLEScanModel(client *api.Client) BLEScanModel {
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(common.ColorPrimary)
 
+	// Try to create a real scanner
+	var scanner ble.ScannerInterface
+	var scannerErr error
+	realScanner, err := ble.NewScanner()
+	if err != nil {
+		scannerErr = err
+		scanner = ble.NewMockScanner() // Fallback to mock
+	} else {
+		scanner = realScanner
+	}
+
 	return BLEScanModel{
-		client:  client,
-		scanner: ble.NewMockScanner(),
-		table:   t,
-		spinner: sp,
-		help:    help.New(),
-		keys:    defaultBLEScanKeyMap(),
-		state:   BLEScanStateIdle,
-		timeout: 30 * time.Second,
+		client:     client,
+		scanner:    scanner,
+		scannerErr: scannerErr,
+		table:      t,
+		spinner:    sp,
+		help:       help.New(),
+		keys:       defaultBLEScanKeyMap(),
+		state:      BLEScanStateInit,
 	}
 }
 
-// Init initializes the BLE scan model
+// Init initializes the BLE scan model and starts scanning automatically
 func (m BLEScanModel) Init() tea.Cmd {
-	return m.spinner.Tick
+	return tea.Batch(m.spinner.Tick, m.startScan())
 }
 
 // Update handles messages for the BLE scan screen
@@ -179,6 +191,7 @@ func (m BLEScanModel) Update(msg tea.Msg) (BLEScanModel, tea.Cmd) {
 		m.height = msg.Height
 		m.help.Width = msg.Width
 		m.table.SetHeight(m.height - 20)
+		m.updateTableColumns()
 		return m, nil
 
 	case tea.KeyMsg:
@@ -197,62 +210,53 @@ func (m BLEScanModel) Update(msg tea.Msg) (BLEScanModel, tea.Cmd) {
 			}
 			return m, tea.Quit
 
-		case key.Matches(msg, m.keys.Start):
-			if m.state == BLEScanStateIdle || m.state == BLEScanStateError {
-				return m, m.startScan()
-			}
-
-		case key.Matches(msg, m.keys.Stop):
+		case key.Matches(msg, m.keys.Pause):
 			if m.state == BLEScanStateScanning {
 				m.stopScan()
-				m.state = BLEScanStateIdle
+				m.state = BLEScanStateInit
 				return m, nil
 			}
 
+		case key.Matches(msg, m.keys.Resume):
+			if m.state == BLEScanStateInit || m.state == BLEScanStateError {
+				return m, m.startScan()
+			}
+
 		case key.Matches(msg, m.keys.Ingest):
-			if m.state == BLEScanStateIdle && len(m.packets) > 0 {
+			if m.state != BLEScanStateIngesting && len(m.packets) > 0 {
+				// Pause scanning while ingesting
+				if m.state == BLEScanStateScanning {
+					m.stopScan()
+				}
 				m.state = BLEScanStateIngesting
 				return m, tea.Batch(m.spinner.Tick, m.ingestPackets())
 			}
 
 		case key.Matches(msg, m.keys.Clear):
-			if m.state == BLEScanStateIdle {
-				m.packets = nil
-				m.rawPackets = nil
-				m.updateTable()
-				return m, nil
-			}
-
-		case msg.String() == "1":
-			if m.state == BLEScanStateIdle {
-				m.timeout = 10 * time.Second
-				return m, nil
-			}
-		case msg.String() == "3":
-			if m.state == BLEScanStateIdle {
-				m.timeout = 30 * time.Second
-				return m, nil
-			}
-		case msg.String() == "6":
-			if m.state == BLEScanStateIdle {
-				m.timeout = 60 * time.Second
-				return m, nil
-			}
+			m.packets = nil
+			m.rawPackets = nil
+			m.updateTable()
+			return m, nil
 		}
 
 	case BLEScanStartedMsg:
 		m.state = BLEScanStateScanning
-		m.startTime = time.Now()
+		m.resultsChan = msg.Results // Store the channel from the message
+		// Start tick loop for continuous polling
 		return m, tea.Batch(m.spinner.Tick, m.tickCmd())
 
 	case BLEScanPacketMsg:
 		m.packets = append(m.packets, msg.Packet)
 		m.rawPackets = append(m.rawPackets, msg.Raw)
 		m.updateTable()
+		// Continue polling for more results
+		if m.state == BLEScanStateScanning {
+			return m, m.pollResults()
+		}
 		return m, nil
 
 	case BLEScanStoppedMsg:
-		m.state = BLEScanStateIdle
+		m.state = BLEScanStateInit
 		if msg.Error != nil && msg.Error != ble.ErrScanStopped {
 			m.state = BLEScanStateError
 			m.err = msg.Error
@@ -260,28 +264,31 @@ func (m BLEScanModel) Update(msg tea.Msg) (BLEScanModel, tea.Cmd) {
 		return m, nil
 
 	case BLEScanTickMsg:
+		// Continuous polling while scanning
 		if m.state == BLEScanStateScanning {
-			// Check if timeout reached
-			if time.Since(m.startTime) >= m.timeout {
-				m.stopScan()
-				m.state = BLEScanStateIdle
-				return m, nil
+			// Poll for results and schedule next tick
+			result := m.pollResultsSync()
+			if result != nil {
+				// Process the result through Update recursively
+				m, cmd := m.Update(result)
+				return m, tea.Batch(cmd, m.tickCmd())
 			}
+			// No result yet, just schedule next tick
 			return m, m.tickCmd()
 		}
+		return m, nil
 
 	case BLEIngestCompleteMsg:
-		m.state = BLEScanStateIdle
 		if msg.Error != nil {
 			m.state = BLEScanStateError
 			m.err = msg.Error
-		} else {
-			// Clear packets after successful ingestion
-			m.packets = nil
-			m.rawPackets = nil
-			m.updateTable()
+			return m, nil
 		}
-		return m, nil
+		// Clear packets after successful ingestion and resume scanning
+		m.packets = nil
+		m.rawPackets = nil
+		m.updateTable()
+		return m, m.startScan()
 
 	case spinner.TickMsg:
 		if m.state == BLEScanStateScanning || m.state == BLEScanStateIngesting {
@@ -292,7 +299,7 @@ func (m BLEScanModel) Update(msg tea.Msg) (BLEScanModel, tea.Cmd) {
 	}
 
 	// Update table
-	if m.state == BLEScanStateIdle && len(m.packets) > 0 {
+	if (m.state == BLEScanStateInit || m.state == BLEScanStateScanning) && len(m.packets) > 0 {
 		var cmd tea.Cmd
 		m.table, cmd = m.table.Update(msg)
 		cmds = append(cmds, cmd)
@@ -305,71 +312,74 @@ func (m BLEScanModel) Update(msg tea.Msg) (BLEScanModel, tea.Cmd) {
 func (m BLEScanModel) View() string {
 	var content strings.Builder
 
-	// Header
-	content.WriteString(common.TitleStyle.Render("BLE Scanner"))
+	// Helper to center text within terminal width
+	centerText := func(s string) string {
+		return lipgloss.NewStyle().Width(m.width).Align(lipgloss.Center).Render(s)
+	}
+
+	// Header (centered)
+	content.WriteString(centerText(common.TitleStyle.Render("BLE Scanner")))
 	content.WriteString("\n")
-	content.WriteString(common.SubtitleStyle.Render("Scan for Hubble BLE advertisements"))
+	content.WriteString(centerText(common.SubtitleStyle.Render("Scan for Hubble BLE advertisements")))
 	content.WriteString("\n\n")
 
-	// Status bar
-	content.WriteString(m.renderStatus())
+	// Status bar (centered)
+	content.WriteString(centerText(m.renderStatus()))
 	content.WriteString("\n\n")
 
 	// Main content
 	switch m.state {
 	case BLEScanStateScanning:
-		content.WriteString(fmt.Sprintf("%s Scanning... (%s elapsed)\n\n",
-			m.spinner.View(),
-			time.Since(m.startTime).Round(time.Second)))
-		content.WriteString(fmt.Sprintf("Found %d packet(s)\n\n", len(m.packets)))
+		content.WriteString(centerText(fmt.Sprintf("%s Scanning...", m.spinner.View())))
+		content.WriteString("\n\n")
+		content.WriteString(centerText(fmt.Sprintf("Found %d packet(s)", len(m.packets))))
+		content.WriteString("\n\n")
 		if len(m.packets) > 0 {
 			content.WriteString(m.table.View())
 		}
 
 	case BLEScanStateIngesting:
-		content.WriteString(fmt.Sprintf("%s Ingesting %d packet(s) to cloud...\n",
-			m.spinner.View(), len(m.packets)))
+		content.WriteString(centerText(fmt.Sprintf("%s Ingesting %d packet(s) to cloud...",
+			m.spinner.View(), len(m.packets))))
+		content.WriteString("\n")
 
 	case BLEScanStateError:
-		content.WriteString(common.ErrorTextStyle.Render("Error: " + m.err.Error()))
+		content.WriteString(centerText(common.ErrorTextStyle.Render("Error: " + m.err.Error())))
 		content.WriteString("\n\n")
-		content.WriteString(common.MutedTextStyle.Render("Press 's' to try again"))
+		content.WriteString(centerText(common.MutedTextStyle.Render("Press 'r' to retry")))
 
-	case BLEScanStateIdle:
-		if len(m.packets) == 0 {
-			content.WriteString(common.MutedTextStyle.Render("No packets captured yet."))
+	case BLEScanStateInit:
+		if m.scannerErr != nil {
+			content.WriteString(centerText(common.ErrorTextStyle.Render("Scanner Error: " + m.scannerErr.Error())))
 			content.WriteString("\n\n")
-			content.WriteString(common.MutedTextStyle.Render("Press 's' to start scanning."))
+			content.WriteString(centerText(common.MutedTextStyle.Render("BLE scanning may not be available.")))
+		} else if len(m.packets) == 0 {
+			content.WriteString(centerText(common.MutedTextStyle.Render("Scan paused. No packets captured yet.")))
+			content.WriteString("\n\n")
+			content.WriteString(centerText(common.MutedTextStyle.Render("Press 'r' or space to resume scanning.")))
 		} else {
-			content.WriteString(fmt.Sprintf("%d packet(s) captured\n\n", len(m.packets)))
+			content.WriteString(centerText(fmt.Sprintf("Scan paused. %d packet(s) captured", len(m.packets))))
+			content.WriteString("\n\n")
 			content.WriteString(m.table.View())
 		}
 	}
 
-	// Help
+	// Help (centered)
 	content.WriteString("\n\n")
-	content.WriteString(m.renderHelp())
+	content.WriteString(centerText(m.renderHelp()))
 
+	// Center vertically, but use full width
 	return lipgloss.Place(
 		m.width,
 		m.height,
+		lipgloss.Left,
 		lipgloss.Center,
-		lipgloss.Center,
-		content.String(),
+		lipgloss.NewStyle().Width(m.width).Render(content.String()),
 	)
 }
 
 func (m BLEScanModel) renderStatus() string {
 	var parts []string
-
-	// Timeout setting
-	timeoutStyle := lipgloss.NewStyle().
-		Foreground(common.ColorMuted).
-		Background(lipgloss.Color("#333333")).
-		Padding(0, 1)
-
-	timeoutStr := fmt.Sprintf("Timeout: %ds", int(m.timeout.Seconds()))
-	parts = append(parts, timeoutStyle.Render(timeoutStr))
 
 	// Packet count
 	countStyle := lipgloss.NewStyle().
@@ -385,8 +395,8 @@ func (m BLEScanModel) renderStatus() string {
 	var stateStyle lipgloss.Style
 
 	switch m.state {
-	case BLEScanStateIdle:
-		stateStr = "IDLE"
+	case BLEScanStateInit:
+		stateStr = "PAUSED"
 		stateStyle = lipgloss.NewStyle().
 			Foreground(common.ColorMuted).
 			Background(lipgloss.Color("#333333")).
@@ -423,28 +433,35 @@ func (m BLEScanModel) renderHelp() string {
 	var helpText []string
 
 	switch m.state {
-	case BLEScanStateIdle:
+	case BLEScanStateInit:
 		helpText = []string{
-			common.FormatHelp("s", "start"),
-			common.FormatHelp("1/3/6", "timeout 10/30/60s"),
+			common.FormatHelp("r/space", "resume"),
 		}
 		if len(m.packets) > 0 {
 			helpText = append(helpText,
 				common.FormatHelp("i", "ingest"),
-				common.FormatHelp("c", "clear"),
 			)
 		}
+		helpText = append(helpText,
+			common.FormatHelp("c", "clear"),
+		)
 	case BLEScanStateScanning:
 		helpText = []string{
-			common.FormatHelp("x", "stop"),
+			common.FormatHelp("p/space", "pause"),
 		}
+		if len(m.packets) > 0 {
+			helpText = append(helpText, common.FormatHelp("i", "ingest"))
+		}
+		helpText = append(helpText,
+			common.FormatHelp("c", "clear"),
+		)
 	case BLEScanStateIngesting:
 		helpText = []string{
 			common.FormatHelp("", "please wait..."),
 		}
 	case BLEScanStateError:
 		helpText = []string{
-			common.FormatHelp("s", "retry"),
+			common.FormatHelp("r", "retry"),
 		}
 	}
 
@@ -453,44 +470,168 @@ func (m BLEScanModel) renderHelp() string {
 	return strings.Join(helpText, "  ")
 }
 
+func (m *BLEScanModel) updateTableColumns() {
+	if m.width == 0 {
+		return
+	}
+
+	// Fixed minimum widths for each column
+	const (
+		minNum       = 4
+		minTime      = 13
+		minRSSI      = 7
+		minVer       = 4
+		minSeq       = 5
+		minDeviceID  = 10
+		minAuthTag   = 10
+		minEncrypted = 18
+	)
+
+	// Calculate extra space to distribute
+	minTotal := minNum + minTime + minRSSI + minVer + minSeq + minDeviceID + minAuthTag + minEncrypted
+	extraSpace := m.width - minTotal
+
+	if extraSpace < 0 {
+		extraSpace = 0
+	}
+
+	// Distribute extra space to the Encrypted Payload column
+	colEncrypted := minEncrypted + extraSpace
+
+	columns := []table.Column{
+		{Title: "#", Width: minNum},
+		{Title: "Time", Width: minTime},
+		{Title: "RSSI", Width: minRSSI},
+		{Title: "Ver", Width: minVer},
+		{Title: "Seq", Width: minSeq},
+		{Title: "Device ID", Width: minDeviceID},
+		{Title: "Auth Tag", Width: minAuthTag},
+		{Title: "Encrypted Payload", Width: colEncrypted},
+	}
+	m.table.SetColumns(columns)
+	// Set table width to sum of column widths
+	tableWidth := minNum + minTime + minRSSI + minVer + minSeq + minDeviceID + minAuthTag + colEncrypted
+	m.table.SetWidth(tableWidth)
+}
+
 func (m *BLEScanModel) updateTable() {
 	rows := make([]table.Row, len(m.packets))
-	for i, p := range m.packets {
-		payloadHex := fmt.Sprintf("%x", p.Payload)
-		if len(payloadHex) > 40 {
-			payloadHex = payloadHex[:37] + "..."
+
+	// Calculate encrypted payload display width based on current terminal width (matches updateTableColumns)
+	const minEncrypted = 18
+	encryptedDisplayWidth := minEncrypted
+	if m.width > 0 {
+		minTotal := 4 + 13 + 7 + 4 + 5 + 10 + 10 + minEncrypted
+		extraSpace := m.width - minTotal
+		if extraSpace < 0 {
+			extraSpace = 0
 		}
+		encryptedDisplayWidth = minEncrypted + extraSpace
+	}
+
+	// Display newest packets first (time-descending order)
+	for i := len(m.packets) - 1; i >= 0; i-- {
+		p := m.packets[i]
+		rowIdx := len(m.packets) - 1 - i // Row index for the table (0 = newest)
 
 		rssiStr := fmt.Sprintf("%d", p.RSSI)
-		if p.RSSI >= -50 {
-			rssiStr = fmt.Sprintf("%d ++", p.RSSI)
-		} else if p.RSSI >= -70 {
-			rssiStr = fmt.Sprintf("%d +", p.RSSI)
-		}
 
-		address := ""
-		if i < len(m.rawPackets) {
-			address = truncate(m.rawPackets[i].Address, 18)
-		}
+		// Parse payload structure:
+		// Byte 0–1 : [Protocol Version (6 bits) | SeqNo (10 bits)]
+		// Byte 2–5 : Ephemeral Device Identifier (32 bits)
+		// Byte 6–9 : Authentication Tag (32 bits)
+		// Bytes 10+: Encrypted payload (0-13 bytes)
+		verStr, seqStr, deviceIDStr, authTagStr, encryptedStr := parsePayloadFields(p.Payload, encryptedDisplayWidth)
 
-		rows[i] = table.Row{
-			fmt.Sprintf("%d", i+1),
+		rows[rowIdx] = table.Row{
+			fmt.Sprintf("%d", i+1), // Keep original packet number for reference
 			p.Timestamp.Format("15:04:05.000"),
 			rssiStr,
-			address,
-			payloadHex,
+			verStr,
+			seqStr,
+			deviceIDStr,
+			authTagStr,
+			encryptedStr,
 		}
 	}
 	m.table.SetRows(rows)
 }
 
+// parsePayloadFields extracts the structured fields from the payload
+// Byte 0–1 : [Protocol Version (6 bits) | SeqNo (10 bits)]
+// Byte 2–5 : Ephemeral Device Identifier (32 bits)
+// Byte 6–9 : Authentication Tag (32 bits)
+// Bytes 10+: Encrypted payload (0-13 bytes)
+func parsePayloadFields(payload []byte, maxEncryptedWidth int) (ver, seq, deviceID, authTag, encrypted string) {
+	if len(payload) < 2 {
+		return "-", "-", "-", "-", "-"
+	}
+
+	// Byte 0-1: Protocol Version (6 bits) | SeqNo (10 bits)
+	// Big-endian (network byte order):
+	// Byte 0: [V5 V4 V3 V2 V1 V0 S9 S8] - version (6 bits) + seq high (2 bits)
+	// Byte 1: [S7 S6 S5 S4 S3 S2 S1 S0] - seq low (8 bits)
+	header := binary.BigEndian.Uint16(payload[0:2])
+	version := (header >> 10) & 0x3F // Top 6 bits
+	seqNo := header & 0x03FF         // Bottom 10 bits
+	ver = fmt.Sprintf("%d", version)
+	seq = fmt.Sprintf("%d", seqNo)
+
+	// Byte 2-5: Ephemeral Device Identifier (32 bits)
+	if len(payload) >= 6 {
+		deviceID = fmt.Sprintf("%08x", payload[2:6])
+	} else {
+		deviceID = "-"
+	}
+
+	// Byte 6-9: Authentication Tag (32 bits)
+	if len(payload) >= 10 {
+		authTag = fmt.Sprintf("%08x", payload[6:10])
+	} else {
+		authTag = "-"
+	}
+
+	// Bytes 10+: Encrypted payload (0-13 bytes)
+	if len(payload) > 10 {
+		encPayload := payload[10:]
+		encrypted = fmt.Sprintf("%x", encPayload)
+		if len(encrypted) > maxEncryptedWidth {
+			encrypted = encrypted[:maxEncryptedWidth-3] + "..."
+		}
+	} else {
+		encrypted = "-"
+	}
+
+	return
+}
+
 func (m *BLEScanModel) startScan() tea.Cmd {
+	// Check if scanner initialization failed
+	if m.scannerErr != nil {
+		return func() tea.Msg {
+			return BLEScanStoppedMsg{Error: m.scannerErr}
+		}
+	}
+
 	m.scanCtx, m.cancelScan = context.WithCancel(context.Background())
 
 	return func() tea.Msg {
-		// For now, return a started message
-		// In production, this would start the actual BLE scan
-		return BLEScanStartedMsg{}
+		opts := ble.ScanOptions{
+			Timeout:          0, // No timeout - scan continuously
+			FilterHubbleOnly: true,
+			Location: models.Location{
+				Fake:      true,
+				Timestamp: time.Now(),
+			},
+		}
+
+		results, err := m.scanner.ScanStream(m.scanCtx, opts)
+		if err != nil {
+			return BLEScanStoppedMsg{Error: err}
+		}
+
+		// Return the channel in the message - it will be stored in Update
+		return BLEScanStartedMsg{Results: results}
 	}
 }
 
@@ -502,12 +643,69 @@ func (m *BLEScanModel) stopScan() {
 	if m.scanner != nil {
 		m.scanner.Stop()
 	}
+	m.resultsChan = nil
 }
 
 func (m BLEScanModel) tickCmd() tea.Cmd {
-	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
+	return tea.Tick(50*time.Millisecond, func(t time.Time) tea.Msg {
 		return BLEScanTickMsg{}
 	})
+}
+
+// pollResultsSync checks for results synchronously (non-blocking)
+func (m *BLEScanModel) pollResultsSync() tea.Msg {
+	if m.resultsChan == nil {
+		return nil
+	}
+
+	select {
+	case result, ok := <-m.resultsChan:
+		if !ok {
+			// Channel closed, scan complete
+			return BLEScanStoppedMsg{}
+		}
+		if result.Packet != nil {
+			return BLEScanPacketMsg{
+				Packet: *result.Packet,
+				Raw:    result.Raw,
+			}
+		}
+		// Parse error or non-matching advertisement - continue scanning
+		// Don't treat ErrNotHubblePacket as a fatal error
+		return nil
+	default:
+		// No result available yet
+		return nil
+	}
+}
+
+func (m *BLEScanModel) pollResults() tea.Cmd {
+	return func() tea.Msg {
+		if m.resultsChan == nil {
+			return nil
+		}
+
+		select {
+		case result, ok := <-m.resultsChan:
+			if !ok {
+				// Channel closed, scan complete
+				return BLEScanStoppedMsg{}
+			}
+			if result.Error != nil {
+				return BLEScanStoppedMsg{Error: result.Error}
+			}
+			if result.Packet != nil {
+				return BLEScanPacketMsg{
+					Packet: *result.Packet,
+					Raw:    result.Raw,
+				}
+			}
+			return nil
+		default:
+			// No result available yet
+			return nil
+		}
+	}
 }
 
 func (m BLEScanModel) ingestPackets() tea.Cmd {
@@ -533,6 +731,7 @@ func (m BLEScanModel) ingestPackets() tea.Cmd {
 }
 
 // SetScanner allows setting a custom scanner (useful for testing)
-func (m *BLEScanModel) SetScanner(scanner *ble.MockScanner) {
+func (m *BLEScanModel) SetScanner(scanner ble.ScannerInterface) {
 	m.scanner = scanner
+	m.scannerErr = nil
 }
