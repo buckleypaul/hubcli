@@ -186,6 +186,11 @@ func (c *Client) patch(ctx context.Context, path string, body interface{}) ([]by
 	return c.request(ctx, http.MethodPatch, path, body)
 }
 
+// delete performs a DELETE request.
+func (c *Client) delete(ctx context.Context, path string) ([]byte, http.Header, error) {
+	return c.request(ctx, http.MethodDelete, path, nil)
+}
+
 // OrgID returns the configured organization ID.
 func (c *Client) OrgID() string {
 	return c.orgID

@@ -27,6 +27,8 @@ const (
 	DevicesStateReady
 	DevicesStateError
 	DevicesStateRegistering
+	DevicesStateDeleteConfirm
+	DevicesStateDeleting
 )
 
 // SortColumn represents which column to sort by
@@ -70,6 +72,11 @@ type (
 	DeviceRegisteredMsg struct {
 		Device *models.Device
 	}
+
+	// DeviceDeletedMsg is sent when a device is deleted
+	DeviceDeletedMsg struct {
+		DeviceID string
+	}
 )
 
 // DevicesModel is the model for the devices screen
@@ -97,6 +104,11 @@ type DevicesModel struct {
 	sortColumn     SortColumn // Column currently being sorted
 	sortAsc        bool
 	selectedColumn SortColumn // Column selected for potential sorting (with brackets)
+
+	// Delete confirmation
+	deleteInput       textinput.Model
+	deleteDevice      *models.Device // Device being deleted
+	deleteConfirmText string         // Text user must type to confirm (first 4 chars of UUID)
 }
 
 // NewDevicesModel creates a new devices screen model
@@ -139,6 +151,14 @@ func NewDevicesModel(client *api.Client) DevicesModel {
 	fi.PromptStyle = lipgloss.NewStyle().Foreground(common.ColorSecondary)
 	fi.TextStyle = lipgloss.NewStyle().Foreground(common.ColorForeground)
 
+	// Initialize delete confirmation input
+	di := textinput.New()
+	di.Placeholder = "xxxx"
+	di.CharLimit = 4
+	di.Width = 10
+	di.PromptStyle = lipgloss.NewStyle().Foreground(common.ColorSecondary)
+	di.TextStyle = lipgloss.NewStyle().Foreground(common.ColorForeground)
+
 	return DevicesModel{
 		client:         client,
 		table:          t,
@@ -147,6 +167,7 @@ func NewDevicesModel(client *api.Client) DevicesModel {
 		keys:           common.DefaultListKeyMap(),
 		state:          DevicesStateLoading,
 		filterInput:    fi,
+		deleteInput:    di,
 		sortColumn:     SortByLastPacket,
 		sortAsc:        false, // Default: most recent first
 		selectedColumn: SortByLastPacket,
@@ -181,6 +202,35 @@ func (m DevicesModel) Update(msg tea.Msg) (DevicesModel, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		// Handle delete confirmation mode
+		if m.state == DevicesStateDeleteConfirm {
+			switch msg.String() {
+			case "esc":
+				m.state = DevicesStateReady
+				m.deleteInput.Blur()
+				m.deleteInput.SetValue("")
+				m.deleteDevice = nil
+				m.table.Focus()
+				return m, nil
+			case "enter":
+				// Check if input matches first 4 characters of device UUID
+				if strings.EqualFold(m.deleteInput.Value(), m.deleteConfirmText) {
+					m.state = DevicesStateDeleting
+					m.deleteInput.Blur()
+					deviceID := m.deleteDevice.ID
+					m.deleteDevice = nil
+					m.deleteInput.SetValue("")
+					return m, tea.Batch(m.spinner.Tick, m.deleteDeviceCmd(deviceID))
+				}
+				// Wrong input - stay in confirmation mode
+				return m, nil
+			default:
+				var cmd tea.Cmd
+				m.deleteInput, cmd = m.deleteInput.Update(msg)
+				return m, cmd
+			}
+		}
+
 		// Handle filter input mode
 		if m.filterActive {
 			switch msg.String() {
@@ -255,6 +305,20 @@ func (m DevicesModel) Update(msg tea.Msg) (DevicesModel, tea.Cmd) {
 				return m, tea.Batch(m.spinner.Tick, m.registerDevice())
 			}
 
+		case msg.String() == "d":
+			// Delete device - initiate confirmation
+			if m.state == DevicesStateReady && !m.filterActive && len(m.filteredDevs) > 0 {
+				device := m.SelectedDevice()
+				if device != nil {
+					m.state = DevicesStateDeleteConfirm
+					m.deleteDevice = device
+					m.deleteConfirmText = device.ID[:4]
+					m.deleteInput.SetValue("")
+					m.deleteInput.Focus()
+					return m, textinput.Blink
+				}
+			}
+
 		// Select sort column with left/right arrows
 		case key.Matches(msg, m.keys.Left):
 			if m.state == DevicesStateReady {
@@ -296,8 +360,12 @@ func (m DevicesModel) Update(msg tea.Msg) (DevicesModel, tea.Cmd) {
 		m.state = DevicesStateLoading
 		return m, tea.Batch(m.spinner.Tick, m.loadDevices())
 
+	case DeviceDeletedMsg:
+		m.state = DevicesStateLoading
+		return m, tea.Batch(m.spinner.Tick, m.loadDevices())
+
 	case spinner.TickMsg:
-		if m.state == DevicesStateLoading || m.state == DevicesStateRegistering {
+		if m.state == DevicesStateLoading || m.state == DevicesStateRegistering || m.state == DevicesStateDeleting {
 			var cmd tea.Cmd
 			m.spinner, cmd = m.spinner.Update(msg)
 			return m, cmd
@@ -467,6 +535,25 @@ func (m DevicesModel) View() string {
 	case DevicesStateRegistering:
 		content.WriteString(fmt.Sprintf("%s Registering new device...", m.spinner.View()))
 
+	case DevicesStateDeleting:
+		content.WriteString(fmt.Sprintf("%s Deleting device...", m.spinner.View()))
+
+	case DevicesStateDeleteConfirm:
+		// Show confirmation prompt
+		deviceName := m.deleteDevice.Name
+		if deviceName == "" {
+			deviceName = "(unnamed)"
+		}
+		content.WriteString(common.ErrorTextStyle.Render("⚠ Delete Device"))
+		content.WriteString("\n\n")
+		content.WriteString(fmt.Sprintf("Device: %s\n", deviceName))
+		content.WriteString(fmt.Sprintf("ID: %s\n\n", m.deleteDevice.ID))
+		content.WriteString("Type the first 4 characters of the device ID to confirm deletion:\n\n")
+		content.WriteString(fmt.Sprintf("  %s ", m.deleteInput.View()))
+		if m.deleteInput.Value() != "" && !strings.EqualFold(m.deleteInput.Value(), m.deleteConfirmText) && len(m.deleteInput.Value()) == 4 {
+			content.WriteString(common.ErrorTextStyle.Render(" ✗ Does not match"))
+		}
+
 	case DevicesStateError:
 		content.WriteString(common.ErrorTextStyle.Render("Error: " + m.err.Error()))
 		content.WriteString("\n\n")
@@ -501,7 +588,12 @@ func (m DevicesModel) View() string {
 	// Help
 	content.WriteString("\n\n")
 	var helpText []string
-	if m.filterActive {
+	if m.state == DevicesStateDeleteConfirm {
+		helpText = []string{
+			common.FormatHelp("enter", "confirm delete"),
+			common.FormatHelp("esc", "cancel"),
+		}
+	} else if m.filterActive {
 		helpText = []string{
 			common.FormatHelp("enter", "apply"),
 			common.FormatHelp("esc", "cancel"),
@@ -514,6 +606,7 @@ func (m DevicesModel) View() string {
 			common.FormatHelp("enter", "view packets"),
 			common.FormatHelp("/", "filter"),
 			common.FormatHelp("n", "new"),
+			common.FormatHelp("d", "delete"),
 			common.FormatHelp("r", "refresh"),
 			common.FormatHelp("esc", "back"),
 		}
@@ -596,6 +689,24 @@ func (m DevicesModel) registerDevice() tea.Cmd {
 		}
 
 		return DeviceRegisteredMsg{Device: device}
+	}
+}
+
+func (m DevicesModel) deleteDeviceCmd(deviceID string) tea.Cmd {
+	return func() tea.Msg {
+		if m.client == nil {
+			return DevicesErrorMsg{Err: fmt.Errorf("no API client")}
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		err := m.client.DeleteDevice(ctx, deviceID)
+		if err != nil {
+			return DevicesErrorMsg{Err: err}
+		}
+
+		return DeviceDeletedMsg{DeviceID: deviceID}
 	}
 }
 

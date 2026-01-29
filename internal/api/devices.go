@@ -104,3 +104,15 @@ func (c *Client) SetDeviceTags(ctx context.Context, deviceID string, tags map[st
 		SetTags: &tags,
 	})
 }
+
+// DeleteDevice deletes a device by its ID.
+func (c *Client) DeleteDevice(ctx context.Context, deviceID string) error {
+	path := fmt.Sprintf("/org/%s/devices/%s", c.orgID, deviceID)
+
+	_, _, err := c.delete(ctx, path)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
