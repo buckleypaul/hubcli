@@ -10,15 +10,27 @@ A terminal user interface (TUI) for interacting with the Hubble Network API, wri
 - **BLE Scanning**: Scan for local Hubble BLE advertisements
 - **Organization Info**: View organization details and validate credentials
 - **Secure Credentials**: macOS Keychain integration for credential storage
-- **Packet Ingestion**: Upload scanned BLE packets to the Hubble cloud
 
 ## Installation
+
+### Homebrew (Recommended)
+
+```bash
+brew tap buckleypaul/tap
+brew install hubcli
+```
+
+To upgrade to the latest version:
+
+```bash
+brew update && brew upgrade hubcli
+```
 
 ### From Source
 
 ```bash
 # Clone the repository
-git clone https://github.com/hubblenetwork/hubcli.git
+git clone https://github.com/buckleypaul/hubcli.git
 cd hubcli
 
 # Build
@@ -30,8 +42,8 @@ make install
 
 ### Requirements
 
-- Go 1.22 or later
 - macOS (for Keychain and BLE support)
+- Go 1.22 or later (only if building from source)
 
 ## Usage
 
@@ -94,11 +106,10 @@ The main menu provides access to all features:
 - Change time window: `1` (1 day), `7` (7 days), `Alt+3` (30 days)
 
 #### BLE Scan Screen
-- Press `s` to start scanning
-- Press `x` to stop scanning
-- Change timeout: `1` (10s), `3` (30s), `6` (60s)
-- Press `i` to ingest captured packets to cloud
+- Scanning starts automatically when entering the screen
+- Press `p` or `Space` to pause/resume scanning
 - Press `c` to clear captured packets
+- Press `Esc` to return to home
 
 #### Settings Screen
 - View credential status (Keychain vs Environment)
@@ -209,5 +220,4 @@ See LICENSE file for details.
 ## Support
 
 For issues and questions:
-- GitHub Issues: [hubblenetwork/hubcli](https://github.com/hubblenetwork/hubcli/issues)
-- Documentation: [Hubble Network Docs](https://docs.hubblenetwork.com)
+- GitHub Issues: [buckleypaul/hubcli](https://github.com/buckleypaul/hubcli/issues)
